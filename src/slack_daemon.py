@@ -76,13 +76,13 @@ class SlackDaemon:
     async def _handle_session_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        thread_ts: str | None = None
         try:
             line = await asyncio.wait_for(reader.readline(), timeout=10.0)
             parts = line.decode().strip().split(" ", 1)
 
             if len(parts) != 2 or parts[0] != "REGISTER":
                 logger.warning("Bad session registration: %r", line)
-                writer.close()
                 return
 
             thread_ts = parts[1]
@@ -90,11 +90,19 @@ class SlackDaemon:
                 self._pending[thread_ts] = writer
 
             logger.info("Session registered for thread %s.", thread_ts)
-            # Connection stays open — reply is sent by _handle_slack_message.
+
+            # Block until the session disconnects (reader.read returns b"" on close).
+            # This ensures _pending is cleaned up if the session exits before a reply arrives.
+            await reader.read(1)
 
         except Exception as exc:
             logger.error("Session connection error: %s", exc)
-            writer.close()
+        finally:
+            if thread_ts:
+                async with self._lock:
+                    self._pending.pop(thread_ts, None)
+            if not writer.is_closing():
+                writer.close()
 
     async def start(self) -> None:
         """Start the Unix socket server and Slack Socket Mode handler concurrently."""
